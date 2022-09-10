@@ -23,9 +23,11 @@ import sys
 import time
 import warnings
 from dataclasses import dataclass
+from functools import lru_cache
 from tempfile import gettempdir
 from typing import TYPE_CHECKING, Callable, Generator, Iterable, List, Optional, Tuple, Union
 
+from flufl.lock import Lock as FileLock
 from sqlalchemy import Table, and_, column, exc, func, inspect, or_, select, table, text, tuple_
 from sqlalchemy.orm.session import Session
 
@@ -1692,6 +1694,14 @@ class DBLocks(enum.IntEnum):
     def __str__(self):
         return f"airflow_{self._name_}"
 
+    @lru_cache(maxsize=None)
+    def get_sqlite_file_lock(self, db_path: str, lifetime:int) -> FileLock:
+        """
+        Returns a ``flufl.lock.Lock`` object corresponding with the current DBLock
+        enum value and the given db_path
+        """
+        return FileLock(f'{db_path}_lock_{str(self)}.lock', lifetime=lifetime, default_timeout=lifetime)
+
 
 @contextlib.contextmanager
 def create_global_lock(
@@ -1708,10 +1718,11 @@ def create_global_lock(
             conn.execute(text('SELECT pg_advisory_lock(:id)'), id=lock.value)
         elif dialect.name == 'mysql' and dialect.server_version_info >= (5, 6):
             conn.execute(text("SELECT GET_LOCK(:id, :timeout)"), id=str(lock), timeout=lock_timeout)
+        elif dialect.name == 'sqlite':
+            lock.get_sqlite_file_lock(conn.engine.url.database, lifetime=lock_timeout).lock()
         elif dialect.name == 'mssql':
             # TODO: make locking work for MSSQL
             pass
-
         yield
     finally:
         if dialect.name == 'postgresql':
@@ -1721,6 +1732,8 @@ def create_global_lock(
                 raise RuntimeError("Error releasing DB lock!")
         elif dialect.name == 'mysql' and dialect.server_version_info >= (5, 6):
             conn.execute(text("select RELEASE_LOCK(:id)"), id=str(lock))
+        elif dialect.name == 'sqlite':
+            lock.get_sqlite_file_lock(conn.engine.url.database, lifetime=lock_timeout).unlock(unconditionally=True)
         elif dialect.name == 'mssql':
             # TODO: make locking work for MSSQL
             pass

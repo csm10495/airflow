@@ -39,6 +39,8 @@ from airflow.utils.db import (
     compare_server_default,
     compare_type,
     create_default_connections,
+    DBLocks,
+    create_global_lock,
     downgrade,
     resetdb,
     upgradedb,
@@ -235,3 +237,20 @@ class TestDb:
             mock_init.assert_not_called()
         else:
             mock_init.assert_called_once_with(session=session_mock)
+
+    @pytest.mark.parametrize('lock', list(DBLocks))
+    def test_create_global_lock_sqlite(self, lock, tmp_path):
+        session = MagicMock()
+        conn = MagicMock()
+        conn.dialect.name = 'sqlite'
+        conn.engine.url.database = str(tmp_path / 'airflow.db')
+        session.get_bind.return_value.connect.return_value = conn
+
+        file_lock = lock.get_sqlite_file_lock(conn.engine.url.database, lifetime=100)
+        assert not file_lock.is_locked
+
+        with create_global_lock(session, lock, lock_timeout=100):
+            assert file_lock.is_locked
+
+        assert not file_lock.is_locked
+
